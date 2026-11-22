@@ -1,0 +1,85 @@
+name: Build TrustedBars
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Comprobar sintaxis de JavaScript
+        run: |
+          node --check js/analysis.js
+          node --check data/bars.js
+          node --check tools/analyze.mjs
+          # Script inline de index.html
+          node -e "
+            const s=require('fs').readFileSync('index.html','utf8');
+            const m=[...s.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+            if(!m.length) throw new Error('Sin script inline');
+            m.forEach(x=>new Function(x[1]));
+            console.log('index.html: OK');"
+
+      - name: Comprobar que los archivos referenciados existen
+        run: |
+          for f in js/analysis.js data/bars.js; do
+            grep -q "src=\"$f\"" index.html || { echo "index.html no referencia $f"; exit 1; }
+            test -f "$f"
+          done
+
+      - name: Prueba de humo del análisis
+        run: |
+          node -e "
+            const A=require('./js/analysis.js');
+            const b=A.fromPlace({id:'X',displayName:{text:'Bar'},location:{latitude:37.39,longitude:-5.99},rating:4.5,userRatingCount:900,priceRange:{startPrice:{units:'10'},endPrice:{units:'14'}},types:['bar']});
+            if(!b.priceDoc||b.price.week[0]!==10||!b.habitual.weekend) throw new Error('Análisis incorrecto');
+            console.log('analysis.js: OK');"
+
+      - name: Preparar carpeta de publicación
+        run: |
+          mkdir -p dist
+          cp -r index.html js data README.md dist/
+          cp -r tools dist/tools
+
+      - name: Empaquetar zip
+        run: cd dist && zip -r ../trustedbars-app.zip .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trustedbars-app
+          path: trustedbars-app.zip
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
